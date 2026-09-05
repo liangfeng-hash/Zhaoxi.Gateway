@@ -1,0 +1,23 @@
+{
+  "ReverseProxy": {
+    "Clusters": {
+      "api-cluster": {
+        "Destinations": {
+          "d1": {
+            "Address": "http://localhost:8000/"
+          },
+          "d2": {
+            "Address": "http://后端第二实例内网IP:8000/"
+          }
+        }
+      },
+      "auth-cluster": {
+        "Destinations": {
+          "d1": {
+            "Address": "http://localhost:8001/"
+          }
+        }
+      }
+    }
+  }
+}

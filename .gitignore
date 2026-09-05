@@ -1,0 +1,18 @@
+## 生成目录
+[Bb]in/
+[Oo]bj/
+[Ll]ogs/
+
+## Visual Studio 本机文件
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## 前端构建产物：由 CI 构建生成，不进版本库
+wwwroot/
+
+## 环境专属配置：含真实凭据，只放在各自机器上
+appsettings.Production.json
+appsettings.*.local.json
