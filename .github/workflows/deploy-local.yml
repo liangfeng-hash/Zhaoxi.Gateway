@@ -84,6 +84,7 @@ jobs:
           Write-Host "网关 /health 正常"
 
           # 顺带确认前端首页出得来（wwwroot 里有没有产物）
-          $home = Invoke-WebRequest "http://localhost/" -UseBasicParsing -TimeoutSec 10
-          if ($home.Content -notmatch '<div id="app">') { Write-Error "前端首页异常，检查 wwwroot"; exit 1 }
+          # 注意：变量别取名 $home —— 那是 PowerShell 的只读自动变量
+          $indexPage = Invoke-WebRequest "http://localhost/" -UseBasicParsing -TimeoutSec 10
+          if ($indexPage.Content -notmatch '<div id="app">') { Write-Error "前端首页异常，检查 wwwroot"; exit 1 }
           Write-Host "前端首页正常"
