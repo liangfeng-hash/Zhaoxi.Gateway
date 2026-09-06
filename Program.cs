@@ -34,6 +34,22 @@ if (!app.Environment.IsDevelopment())
 
 app.MapHealthChecks("/health").AllowAnonymous();
 
+// 部署验证端点：返回程序集的构建时间和主机名。
+// 每次发布后对比 buildTime 是否变新，就能确认「跑的确实是这次构建的产物」，
+// 而不是 robocopy 没同步上、或应用池没回收导致的旧进程。
+app.MapGet("/gateway/info", () =>
+{
+    var asm = System.Reflection.Assembly.GetEntryAssembly()!;
+    return Results.Json(new
+    {
+        service    = "Zhaoxi.Gateway",
+        version    = asm.GetName().Version?.ToString(),
+        machine    = Environment.MachineName,
+        buildTime  = System.IO.File.GetLastWriteTime(asm.Location).ToString("yyyy-MM-dd HH:mm:ss"),
+        serverTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+    });
+}).AllowAnonymous();
+
 // ① 先重写 "/" → "/index.html"
 app.UseDefaultFiles();
 
