@@ -1,7 +1,15 @@
 name: 部署到本机
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
+    # 只有这些路径变了才触发。网关是扁平结构，文件少，正列一目了然
+    paths:
+      - 'Program.cs'
+      - '*.csproj'
+      - 'appsettings*'          # 含 appsettings.json 和 .template
+      - '.github/workflows/**'
+  workflow_dispatch:      # 保留手动触发，排障时有用
 
 concurrency:
   group: deploy-local-gateway
