@@ -1,0 +1,89 @@
+name: 部署到本机
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-local-gateway
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: 'true'
+  # ⚠️ 关掉 git 的 fsmonitor 守护进程，否则 checkout 收尾时报 EBUSY（详见附录 A）
+  GIT_CONFIG_COUNT: '1'
+  GIT_CONFIG_KEY_0: 'core.fsmonitor'
+  GIT_CONFIG_VALUE_0: 'false'
+  GW_SITE:     'C:\inetpub\zhaoxi-gateway'
+  GW_POOL:     'zhaoxi-gateway'
+  GW_URL:      'http://localhost/health'      # 网关自身的 health，不是 /api/health（见下面 ③）
+  BACKUP_ROOT: 'C:\deploy-backup'
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, windows, local]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建
+        shell: pwsh
+        run: dotnet publish Zhaoxi.Gateway.csproj -c Release -o "$env:RUNNER_TEMP\publish\gateway"
+
+      - name: 备份
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:BACKUP_ROOT "gateway\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+          robocopy $env:GW_SITE $dest /E /XD logs wwwroot /NFL /NDL /NJH /NJS /R:2 /W:1 | Out-Null
+          if ($LASTEXITCODE -ge 8) { Write-Error "备份失败"; exit 1 }
+          Get-ChildItem (Join-Path $env:BACKUP_ROOT 'gateway') -Directory |
+            Sort-Object Name -Descending | Select-Object -Skip 5 | Remove-Item -Recurse -Force
+          exit 0
+
+      - name: 放置 app_offline.htm
+        shell: pwsh
+        run: |
+          '<html><body><h2>正在部署…</h2></body></html>' |
+            Set-Content (Join-Path $env:GW_SITE 'app_offline.htm') -Encoding UTF8
+          Start-Sleep -Seconds 5
+
+      - name: 同步
+        shell: pwsh
+        run: |
+          robocopy "$env:RUNNER_TEMP\publish\gateway" $env:GW_SITE /MIR `
+            /XF appsettings.Production.json app_offline.htm `
+            /XD logs wwwroot `
+            /NFL /NDL /NJH /NJS /R:3 /W:2
+          if ($LASTEXITCODE -ge 8) { Write-Error "同步失败 code=$LASTEXITCODE"; exit 1 }
+          exit 0
+
+      - name: 移除 app_offline.htm
+        if: always()
+        shell: pwsh
+        run: Remove-Item (Join-Path $env:GW_SITE 'app_offline.htm') -Force -ErrorAction SilentlyContinue
+
+      - name: 回收应用池
+        shell: pwsh
+        run: |
+          Import-Module WebAdministration
+          Restart-WebAppPool -Name $env:GW_POOL
+          Write-Host "$env:GW_POOL -> $((Get-WebAppPoolState -Name $env:GW_POOL).Value)"
+
+      - name: 健康检查（网关自身 + 前端首页）
+        shell: pwsh
+        run: |
+          $ok = $false
+          for ($i = 1; $i -le 12; $i++) {
+            try {
+              if ((Invoke-WebRequest $env:GW_URL -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) {
+                $ok = $true; break
+              }
+            } catch { }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ok) { Write-Error "网关健康检查失败"; exit 1 }
+          Write-Host "网关 /health 正常"
+
+          # 顺带确认前端首页出得来（wwwroot 里有没有产物）
+          $home = Invoke-WebRequest "http://localhost/" -UseBasicParsing -TimeoutSec 10
+          if ($home.Content -notmatch '<div id="app">') { Write-Error "前端首页异常，检查 wwwroot"; exit 1 }
+          Write-Host "前端首页正常"
