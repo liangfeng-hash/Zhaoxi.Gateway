@@ -1,8 +1,0 @@
-{
-  "ReverseProxy": {
-    "Clusters": {
-      "api-cluster":  { "Destinations": __GW_API_DESTINATIONS__ },
-      "auth-cluster": { "Destinations": __GW_AUTH_DESTINATIONS__ }
-    }
-  }
-}

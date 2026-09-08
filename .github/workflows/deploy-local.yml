@@ -7,7 +7,7 @@ on:
     paths:
       - 'Program.cs'
       - '*.csproj'
-      - 'appsettings*'          # 含 appsettings.json 和 .template
+      - 'appsettings*'          # appsettings.json 等配置文件
       - '.github/workflows/**'
   workflow_dispatch:      # 保留手动触发，排障时有用
 
