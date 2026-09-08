@@ -23,12 +23,14 @@ env:
   GIT_CONFIG_VALUE_0: 'false'
   GW_SITE:     'C:\inetpub\zhaoxi-gateway'
   GW_POOL:     'zhaoxi-gateway'
+  GW_SITENAME: 'zhaoxi-gateway'    # IIS 站点名（与应用池同名，但两者是不同对象）
   GW_URL:      'http://localhost/health'      # 网关自身的 health，不是 /api/health（见下面 ③）
   BACKUP_ROOT: 'C:\deploy-backup'
 
 jobs:
   deploy:
     runs-on: [self-hosted, windows, local]
+    environment: local          # 决定读哪一套 Environment Secrets/Variables
 
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +38,42 @@ jobs:
       - name: 构建
         shell: pwsh
         run: dotnet publish Zhaoxi.Gateway.csproj -c Release -o "$env:RUNNER_TEMP\publish\gateway"
+
+      # ---------- 渲染生产配置 ----------
+      # 位置：构建之后、备份之前。渲染失败就中止，此时站点还没被碰过。
+      - name: 渲染生产配置
+        shell: pwsh
+        env:
+          GW_API_DESTINATIONS:  ${{ vars.GW_API_DESTINATIONS }}
+          GW_AUTH_DESTINATIONS: ${{ vars.GW_AUTH_DESTINATIONS }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($n in 'GW_API_DESTINATIONS','GW_AUTH_DESTINATIONS') {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($n))) {
+              Write-Error "缺少 variable: $n（去仓库 Settings - Environments 里配）"; exit 1
+            }
+          }
+
+          # variable 里存的是 JSON 片段，转成对象后嵌进去，不用拼字符串
+          $cfg = @{
+            ReverseProxy = @{
+              Clusters = @{
+                'api-cluster'  = @{ Destinations = ($env:GW_API_DESTINATIONS  | ConvertFrom-Json) }
+                'auth-cluster' = @{ Destinations = ($env:GW_AUTH_DESTINATIONS | ConvertFrom-Json) }
+              }
+            }
+          }
+          $out = "$env:RUNNER_TEMP\publish\gateway\appsettings.Production.json"
+          [System.IO.File]::WriteAllText($out, ($cfg | ConvertTo-Json -Depth 10),
+                                         (New-Object System.Text.UTF8Encoding $false))
+          Write-Host "  渲染 -> $out"
+
+          # 校验：至少有一个后端节点，否则网关起来了也转发不出去
+          $chk = Get-Content $out -Raw -Encoding UTF8 | ConvertFrom-Json
+          $n1 = ($chk.ReverseProxy.Clusters.'api-cluster'.Destinations  | Get-Member -MemberType NoteProperty).Count
+          $n2 = ($chk.ReverseProxy.Clusters.'auth-cluster'.Destinations | Get-Member -MemberType NoteProperty).Count
+          if ($n1 -lt 1 -or $n2 -lt 1) { Write-Error "集群节点为空：api=$n1 auth=$n2"; exit 1 }
+          Write-Host "  节点数校验通过（api=$n1, auth=$n2）"
 
       - name: 备份
         shell: pwsh
@@ -58,7 +96,7 @@ jobs:
         shell: pwsh
         run: |
           robocopy "$env:RUNNER_TEMP\publish\gateway" $env:GW_SITE /MIR `
-            /XF appsettings.Production.json app_offline.htm `
+            /XF appsettings.Development.json app_offline.htm `
             /XD logs wwwroot `
             /NFL /NDL /NJH /NJS /R:3 /W:2
           if ($LASTEXITCODE -ge 8) { Write-Error "同步失败 code=$LASTEXITCODE"; exit 1 }
@@ -69,12 +107,33 @@ jobs:
         shell: pwsh
         run: Remove-Item (Join-Path $env:GW_SITE 'app_offline.htm') -Force -ErrorAction SilentlyContinue
 
-      - name: 回收应用池
+      - name: 启动应用池与站点
         shell: pwsh
+        # ⚠️ 三个层级各自独立：app_offline.htm（应用层，上一步已删）、
+        # 应用池（进程层，停着是 503）、站点（端口监听层，停着直接连不上）。
+        # 只回收应用池不够 —— 站点被停过或新机器首次部署时，它不会自己起来。
         run: |
-          Import-Module WebAdministration
-          Restart-WebAppPool -Name $env:GW_POOL
-          Write-Host "$env:GW_POOL -> $((Get-WebAppPoolState -Name $env:GW_POOL).Value)"
+          $appcmd = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+
+          $state = (& $appcmd list apppool "$env:GW_POOL" /text:state) 2>$null
+          if ($state -ne 'Started') {
+            & $appcmd start apppool "$env:GW_POOL" | Out-Null
+            Write-Host "  应用池 $env:GW_POOL 已启动（原状态: $state）"
+          } else {
+            & $appcmd recycle apppool "$env:GW_POOL" | Out-Null
+            Write-Host "  应用池 $env:GW_POOL 已回收"
+          }
+
+          $state = (& $appcmd list site "$env:GW_SITENAME" /text:state) 2>$null
+          if ([string]::IsNullOrWhiteSpace($state)) {
+            Write-Error "站点 $env:GW_SITENAME 不存在 —— 需要先按手册 1.4 建站"; exit 1
+          }
+          if ($state -ne 'Started') {
+            & $appcmd start site "$env:GW_SITENAME" | Out-Null
+            Write-Host "  站点 $env:GW_SITENAME 已启动（原状态: $state）"
+          } else {
+            Write-Host "  站点 $env:GW_SITENAME 运行中"
+          }
 
       - name: 健康检查（网关自身 + 前端首页）
         shell: pwsh
