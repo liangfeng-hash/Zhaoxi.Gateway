@@ -96,3 +96,42 @@ jobs:
           $indexPage = Invoke-WebRequest "http://localhost/" -UseBasicParsing -TimeoutSec 10
           if ($indexPage.Content -notmatch '<div id="app">') { Write-Error "前端首页异常，检查 wwwroot"; exit 1 }
           Write-Host "前端首页正常"
+
+      # ---------- 冒烟测试 ----------
+      # 全程走 80 端口，比后端那条多验一层：YARP 的 /auth 和 /api 两条路由都要转发正确
+      - name: 冒烟测试（经网关：登录 → 带 token 查业务数据）
+        shell: pwsh
+        env:
+          SMOKE_USER: ${{ vars.SMOKE_USER }}
+          SMOKE_PASS: ${{ secrets.SMOKE_PASS }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:SMOKE_USER) -or [string]::IsNullOrWhiteSpace($env:SMOKE_PASS)) {
+            Write-Error "缺少 SMOKE_USER / SMOKE_PASS，去仓库 Settings 配一下（见手册 4.5）"; exit 1
+          }
+          $gw = 'http://localhost'
+
+          # ① 登录 —— 经网关 /auth 路由转发到 IdentityApi
+          $body  = @{ Name = $env:SMOKE_USER; Password = $env:SMOKE_PASS } | ConvertTo-Json
+          $login = Invoke-RestMethod "$gw/auth/Account" -Method Post -Body $body `
+                     -ContentType 'application/json' -TimeoutSec 20
+          if (-not $login.success) { Write-Error "① 经网关登录失败: $($login.message)"; exit 1 }
+
+          $token = $login.oValue.accesstoken
+          if ([string]::IsNullOrWhiteSpace($token)) { Write-Error "① 登录成功却没拿到 token"; exit 1 }
+          Write-Host "① /auth 路由转发正常（用户 $($login.data.userName)）"
+
+          # ② 带 token 查业务数据 —— 经网关 /api 路由转发到 MentApi
+          $menus = Invoke-RestMethod "$gw/api/Menu/1/10" `
+                     -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 20
+          if (-not $menus.success) { Write-Error "② 经网关业务查询失败: $($menus.message)"; exit 1 }
+          Write-Host "② /api 路由转发正常（$($menus.message)）"
+
+          # ③ 反向验证：不带 token 必须被拒（同时确认网关没把 Authorization 头吃掉）。
+          #    ⚠️ 本项目是「HTTP 200 + body 业务码」风格：鉴权失败也返回 HTTP 200，
+          #    真实结果在 success / oValue 里。所以必须判 body，不能靠 catch HTTP 异常。
+          $anon = Invoke-RestMethod "$gw/api/Menu/1/10" -TimeoutSec 15
+          if ($anon.success) { Write-Error "③ 无 token 竟能拿到数据 —— 鉴权失效"; exit 1 }
+          Write-Host "③ 无 token 被正确拒绝（业务码 $($anon.oValue)）"
+
+          Write-Host "`n冒烟测试全部通过：网关转发 / 登录链路 / 鉴权拦截"
